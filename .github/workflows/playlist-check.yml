@@ -1,51 +1,59 @@
-name: Apple‑Music Playlist Monitor
+name: Apple Music Playlist Monitor
 
 on:
   schedule:
-    # every 10 minutes (adjust as you like)
-    - cron:  '*/10 * * * *'
-  workflow_dispatch:     # lets you run it manually, too
+    - cron: '*/10 * * * *'  # every 10 minutes
+  workflow_dispatch:       # manual trigger
 
 jobs:
-  check:
+  check-playlist:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-    - name: Run changedetection.io one‑off
-      run: |
-        docker run --rm \
-          -e PLAYLIST_URL="${{ secrets.PLAYLIST_URL }}" \
-          -e LAST_HASH_FILE="last_hash.txt" \
-          ghcr.io/dgtlmoon/changedetection.io:latest \
-          /bin/sh -c '
-            apk add --no-cache curl grep;
-            DESC=$(curl -s "$PLAYLIST_URL" | grep -oP "(?<=<meta property=\"og:description\" content=\")[^\"]+");
-            HASH=$(echo -n "$DESC" | sha256sum | cut -d" " -f1);
-            echo "Current hash: $HASH";
-            if [ -f "$LAST_HASH_FILE" ]; then
-              OLD=$(cat "$LAST_HASH_FILE");
-              echo "Previous hash: $OLD";
-            else
-              OLD="";
-            fi
-            if [ "$HASH" != "$OLD" ]; then
-              echo "Description changed!";
-              echo "$HASH" > "$LAST_HASH_FILE";
-              if [ -n "$WEBHOOK_URL" ]; then
-                curl -X POST -H "Content-Type: application/json" \
-                  --data "{\"text\":\"Apple Music playlist description updated!\"}" \
-                  "$WEBHOOK_URL";
-              fi
-            else
-              echo "No change.";
-            fi
-          '
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-    - name: Persist last hash between runs
-      uses: actions/upload-artifact@v4
-      with:
-        name: last_hash
-        path: last_hash.txt
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run script
+        env:
+          PLAYLIST_URL: ${{ secrets.PLAYLIST_URL }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          python <<EOF
+          import os, hashlib, requests
+          from bs4 import BeautifulSoup
+
+          playlist_url = os.environ['PLAYLIST_URL']
+          webhook_url = os.environ.get('WEBHOOK_URL')
+
+          headers = {"User-Agent": "Mozilla/5.0"}
+          response = requests.get(playlist_url, headers=headers)
+          soup = BeautifulSoup(response.text, "html.parser")
+          desc_element = soup.find("meta", attrs={"name": "Description"})
+          description = desc_element["content"] if desc_element else "No description"
+
+          hash_file = ".last_description_hash"
+          new_hash = hashlib.sha256(description.encode()).hexdigest()
+
+          try:
+              with open(hash_file, "r") as f:
+                  old_hash = f.read().strip()
+          except FileNotFoundError:
+              old_hash = ""
+
+          if new_hash != old_hash:
+              print("Description changed!")
+              if webhook_url:
+                  requests.post(webhook_url, json={"content": f"Playlist description changed: {description}"})
+              with open(hash_file, "w") as f:
+                  f.write(new_hash)
+          else:
+              print("No change.")
+          EOF
